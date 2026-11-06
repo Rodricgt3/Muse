@@ -1,0 +1,53 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function admin() {
+      let team = get(/databases/$(database)/documents/settings/team).data.uids;
+      return signedIn() && team is list && team.size() <= 4 && request.auth.uid in team;
+    }
+    function text(value, max) { return value is string && value.size() > 0 && value.size() <= max; }
+    match /settings/team {
+      allow get: if signedIn();
+      allow write: if false;
+    }
+    match /settings/public {
+      allow get: if true;
+      allow create, update: if admin() && request.resource.data.keys().hasOnly(['open']) && request.resource.data.open is bool;
+    }
+    match /settings/payment {
+      allow get: if admin();
+      allow create, update: if admin() && request.resource.data.keys().hasOnly(['bank']) && request.resource.data.bank is string && request.resource.data.bank.size() <= 1000;
+    }
+    match /requests/{id} {
+      function owner() { return signedIn() && resource.data.userId == request.auth.uid; }
+      function changedOnly(fields) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields); }
+      function paymentCopy() { return text(request.resource.data.bank, 1000) && request.resource.data.bank == get(/databases/$(database)/documents/settings/payment).data.bank; }
+      allow get, list: if admin() || owner();
+      allow create: if signedIn()
+        && get(/databases/$(database)/documents/settings/public).data.open == true
+        && request.resource.data.keys().hasOnly(['userId','name','email','subject','message','plan','price','status','createdAt','updatedAt'])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.email == request.auth.token.email
+        && text(request.resource.data.name, 80)
+        && text(request.resource.data.message, 600)
+        && request.resource.data.subject in ['Inglés · Cambridge', 'Matemáticas · ALEKS']
+        && ((request.resource.data.plan in ['english','math'] && request.resource.data.price == 149)
+          || (request.resource.data.plan == 'monthly' && request.resource.data.price == 499))
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time && request.resource.data.updatedAt == request.time;
+      allow update: if request.resource.data.updatedAt == request.time && (
+        (owner() && resource.data.status == 'approved' && request.resource.data.status == 'reviewing'
+          && changedOnly(['reference','status','updatedAt']) && text(request.resource.data.reference, 100))
+        || (admin() && request.resource.data.reviewedBy == request.auth.uid
+          && changedOnly(['status','bank','reviewedBy','updatedAt'])
+          && ((resource.data.status == 'pending' && request.resource.data.status == 'approved' && paymentCopy()
+               && get(/databases/$(database)/documents/settings/public).data.open == true)
+            || (resource.data.status == 'pending' && request.resource.data.status == 'rejected' && !request.resource.data.keys().hasAny(['bank']))
+            || (resource.data.status == 'reviewing' && request.resource.data.status in ['active','approved']
+               && request.resource.data.bank == resource.data.bank)))
+      );
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
